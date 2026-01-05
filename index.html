@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDFちょこっと整理（結合・分割・削除）</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <!-- PDF Libraries -->
+    <script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <!-- SortableJS for drag and drop reordering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
+
+    <script>
+        // PDF.js worker configuration
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        brand: {
+                            50: '#f0f9ff',
+                            100: '#e0f2fe',
+                            500: '#0ea5e9',
+                            600: '#0284c7',
+                            700: '#0369a1',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
+            background-color: #f3f4f6;
+        }
+        .page-card {
+            transition: transform 0.2s, box-shadow 0.2s;
+            cursor: grab;
+        }
+        .page-card:active {
+            cursor: grabbing;
+        }
+        .page-card.sortable-ghost {
+            opacity: 0.4;
+            background-color: #e0f2fe;
+        }
+        .delete-btn {
+            display: none;
+        }
+        .page-card:hover .delete-btn {
+            display: flex;
+        }
+        /* Loading Overlay */
+        #loading-overlay {
+            backdrop-filter: blur(4px);
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #0ea5e9;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="h-screen flex flex-col text-slate-700">
+
+    <!-- Header -->
+    <header class="bg-white border-b border-slate-200 px-6 py-4 flex justify-between items-center shadow-sm z-10">
+        <div class="flex items-center gap-3">
+            <div class="bg-brand-100 p-2 rounded-lg text-brand-600">
+                <i class="ph ph-files text-2xl"></i>
+            </div>
+            <div>
+                <h1 class="text-xl font-bold text-slate-800">PDFちょこっと整理</h1>
+                <p class="text-xs text-slate-500">完全オフライン処理・機密情報も安心</p>
+            </div>
+        </div>
+        <div class="flex gap-3">
+            <button onclick="clearAll()" class="px-4 py-2 text-sm text-slate-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors flex items-center gap-2">
+                <i class="ph ph-trash"></i>
+                全てクリア
+            </button>
+            <button id="save-btn" onclick="savePDF()" disabled class="bg-brand-600 hover:bg-brand-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white px-6 py-2 rounded-lg font-bold shadow-sm transition-all flex items-center gap-2">
+                <i class="ph ph-download-simple"></i>
+                結合して保存
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 flex flex-col overflow-hidden relative">
+        
+        <!-- Status Bar -->
+        <div id="status-bar" class="bg-brand-50 text-brand-700 text-sm py-2 px-6 text-center hidden border-b border-brand-100">
+            ページを読み込み中...
+        </div>
+
+        <!-- Scrollable Area -->
+        <div class="flex-1 overflow-y-auto p-8" id="workspace">
+            
+            <!-- Empty State / Drop Zone -->
+            <div id="drop-zone" class="h-full min-h-[300px] border-4 border-dashed border-slate-300 rounded-2xl flex flex-col items-center justify-center bg-white hover:bg-slate-50 transition-colors cursor-pointer group">
+                <input type="file" id="file-input" multiple accept="application/pdf" class="hidden">
+                <div class="bg-slate-100 p-6 rounded-full mb-4 group-hover:scale-110 transition-transform">
+                    <i class="ph ph-file-pdf text-4xl text-slate-400"></i>
+                </div>
+                <h2 class="text-2xl font-bold text-slate-600 mb-2">PDFをここにドロップ</h2>
+                <p class="text-slate-500">またはクリックしてファイルを選択</p>
+                <p class="text-xs text-slate-400 mt-4">複数のファイルを一度に追加できます</p>
+            </div>
+
+            <!-- Page Grid (Hidden by default) -->
+            <div id="page-grid" class="hidden grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6 pb-20">
+                <!-- Pages will be injected here -->
+            </div>
+        </div>
+
+        <!-- Floating Action Button for Adding More (Mobile/Tablet friendly) -->
+        <button onclick="document.getElementById('file-input').click()" id="fab-add" class="hidden absolute bottom-8 right-8 bg-slate-800 hover:bg-slate-900 text-white p-4 rounded-full shadow-lg transition-transform hover:scale-105">
+            <i class="ph ph-plus text-2xl"></i>
+        </button>
+
+    </main>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="fixed inset-0 bg-white/80 z-50 flex flex-col items-center justify-center hidden">
+        <div class="loader mb-4"></div>
+        <p id="loading-text" class="text-slate-600 font-medium">処理中...</p>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-8 left-1/2 transform -translate-x-1/2 bg-slate-800 text-white px-6 py-3 rounded-lg shadow-lg opacity-0 transition-opacity pointer-events-none z-50">
+        保存しました
+    </div>
+
+    <script>
+        // --- State Management ---
+        // We store the original ArrayBuffers of uploaded files.
+        // The DOM elements (page cards) will hold references to which file and page they belong to.
+        let sourceFiles = []; // Array of { id: string, buffer: ArrayBuffer, name: string }
+        let isProcessing = false;
+
+        // --- DOM Elements ---
+        const dropZone = document.getElementById('drop-zone');
+        const fileInput = document.getElementById('file-input');
+        const pageGrid = document.getElementById('page-grid');
+        const saveBtn = document.getElementById('save-btn');
+        const fabAdd = document.getElementById('fab-add');
+        const loadingOverlay = document.getElementById('loading-overlay');
+        const loadingText = document.getElementById('loading-text');
+        const statusBar = document.getElementById('status-bar');
+
+        // --- Initialization ---
+        
+        // Initialize SortableJS
+        new Sortable(pageGrid, {
+            animation: 150,
+            ghostClass: 'sortable-ghost',
+            onEnd: updateUIState // Update save button text/state on reorder
+        });
+
+        // Event Listeners for Drag & Drop
+        dropZone.addEventListener('click', () => fileInput.click());
+        
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, preventDefaults, false);
+            document.body.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, () => dropZone.classList.add('bg-blue-50', 'border-brand-300'), false);
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, () => dropZone.classList.remove('bg-blue-50', 'border-brand-300'), false);
+        });
+
+        dropZone.addEventListener('drop', handleDrop, false);
+        fileInput.addEventListener('change', handleFiles, false);
+
+        // Allow dropping anywhere once the grid is active
+        document.body.addEventListener('drop', (e) => {
+            if(!dropZone.classList.contains('hidden')) return; // handled by dropzone
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            handleFiles({ target: { files: files } });
+        });
+
+        // --- Core Logic ---
+
+        function handleDrop(e) {
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            handleFiles({ target: { files: files } });
+        }
+
+        async function handleFiles(e) {
+            const files = Array.from(e.target.files).filter(f => f.type === 'application/pdf');
+            if (files.length === 0) return;
+
+            showLoading(true, `${files.length}個のファイルを読み込み中...`);
+
+            try {
+                // Switch view to grid mode
+                dropZone.classList.add('hidden');
+                pageGrid.classList.remove('hidden');
+                pageGrid.classList.add('flex'); // grid is applied via class but we need to unhide
+                fabAdd.classList.remove('hidden');
+
+                for (const file of files) {
+                    await processPDFFile(file);
+                }
+                
+                showToast(`${files.length}個のファイルを追加しました`);
+                updateUIState();
+            } catch (err) {
+                console.error(err);
+                alert('PDFの読み込み中にエラーが発生しました。破損しているか、パスワード保護されている可能性があります。');
+            } finally {
+                showLoading(false);
+                fileInput.value = ''; // Reset input
+            }
+        }
+
+        async function processPDFFile(file) {
+            const arrayBuffer = await file.arrayBuffer();
+            const fileId = Math.random().toString(36).substr(2, 9);
+            
+            // 重要: PDF.jsの処理（Web Workerへの転送など）でArrayBufferが切り離される（detached）
+            // 可能性があるため、保存用（pdf-lib用）にコピーを作成しておく。
+            const bufferForStorage = arrayBuffer.slice(0);
+
+            // Store source buffer
+            sourceFiles.push({
+                id: fileId,
+                buffer: bufferForStorage, // コピーを保存
+                name: file.name
+            });
+
+            // Parse PDF for rendering thumbnails
+            // こちらは元のバッファを使用（PDF.jsが消費しても問題ないように）
+            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            
+            for (let i = 1; i <= pdf.numPages; i++) {
+                const page = await pdf.getPage(i);
+                await createPageCard(page, i, fileId, file.name);
+            }
+        }
+
+        async function createPageCard(page, pageNum, fileId, fileName) {
+            // Render thumbnail
+            const scale = 0.5; // Smaller scale for thumbnails to save memory
+            const viewport = page.getViewport({ scale: scale });
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            canvas.height = viewport.height;
+            canvas.width = viewport.width;
+
+            await page.render({
+                canvasContext: context,
+                viewport: viewport
+            }).promise;
+
+            const thumbnailData = canvas.toDataURL();
+
+            // Create DOM Element
+            const div = document.createElement('div');
+            div.className = 'page-card relative bg-white rounded-lg shadow-sm border border-slate-200 hover:shadow-md overflow-hidden group select-none';
+            div.setAttribute('data-file-id', fileId);
+            div.setAttribute('data-page-index', pageNum - 1); // 0-based index for pdf-lib
+
+            div.innerHTML = `
+                <div class="relative aspect-[1/1.4] bg-slate-100 border-b border-slate-100">
+                    <img src="${thumbnailData}" class="w-full h-full object-contain pointer-events-none">
+                    <div class="absolute inset-0 bg-black/0 hover:bg-black/5 transition-colors"></div>
+                    
+                    <!-- Delete Button -->
+                    <button onclick="removePage(this)" class="delete-btn absolute top-2 right-2 bg-red-500 hover:bg-red-600 text-white rounded-full p-2 shadow-lg transition-transform hover:scale-110" title="このページを削除">
+                        <i class="ph ph-trash font-bold"></i>
+                    </button>
+                </div>
+                <div class="p-3 text-xs text-slate-500 bg-white">
+                    <div class="font-bold truncate text-slate-700" title="${fileName}">${fileName}</div>
+                    <div class="flex justify-between mt-1">
+                        <span>p.${pageNum}</span>
+                        <i class="ph ph-dots-six-vertical text-lg text-slate-300 cursor-grab"></i>
+                    </div>
+                </div>
+            `;
+
+            pageGrid.appendChild(div);
+        }
+
+        // --- Actions ---
+
+        window.removePage = function(btn) {
+            // Find the closest card container
+            const card = btn.closest('.page-card');
+            
+            // Animate removal
+            card.style.transform = 'scale(0.9) opacity(0)';
+            setTimeout(() => {
+                card.remove();
+                updateUIState();
+            }, 200);
+        }
+
+        window.clearAll = function() {
+            if (pageGrid.children.length > 0) {
+                if(!confirm('全ての作業内容をクリアしますか？')) return;
+            }
+            pageGrid.innerHTML = '';
+            sourceFiles = [];
+            
+            // Reset UI
+            dropZone.classList.remove('hidden');
+            pageGrid.classList.add('hidden');
+            fabAdd.classList.add('hidden');
+            updateUIState();
+        }
+
+        window.savePDF = async function() {
+            const cards = document.querySelectorAll('.page-card');
+            if (cards.length === 0) return;
+
+            showLoading(true, 'PDFを作成中...');
+
+            try {
+                // Create a new PDF
+                const { PDFDocument } = PDFLib;
+                const newPdf = await PDFDocument.create();
+
+                // Group pages by source file to minimize loading documents repeatedly
+                // Although, for sequential writing, we iterate through the cards order.
+                
+                // Optimized approach: 
+                // 1. Create a map of loaded PDFDocs: { fileId: PDFDocument }
+                // 2. Iterate cards, use the map to copy pages.
+
+                const loadedDocs = {};
+
+                for (const card of cards) {
+                    const fileId = card.getAttribute('data-file-id');
+                    const pageIndex = parseInt(card.getAttribute('data-page-index'));
+
+                    // Load source doc if not already loaded
+                    if (!loadedDocs[fileId]) {
+                        const sourceFile = sourceFiles.find(f => f.id === fileId);
+                        if (sourceFile) {
+                            loadedDocs[fileId] = await PDFDocument.load(sourceFile.buffer);
+                        }
+                    }
+
+                    const sourceDoc = loadedDocs[fileId];
+                    if (sourceDoc) {
+                        const [copiedPage] = await newPdf.copyPages(sourceDoc, [pageIndex]);
+                        newPdf.addPage(copiedPage);
+                    }
+                }
+
+                // Serialize the PDFDocument to bytes (a Uint8Array)
+                const pdfBytes = await newPdf.save();
+
+                // Trigger download
+                const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                
+                // Timestamp filename
+                const now = new Date();
+                const timestamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
+                link.download = `edited_${timestamp}.pdf`;
+                
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+
+                showToast('PDFをダウンロードしました');
+
+            } catch (err) {
+                console.error(err);
+                alert('保存中にエラーが発生しました。');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        // --- Helpers ---
+
+        function updateUIState() {
+            const count = pageGrid.children.length;
+            saveBtn.disabled = count === 0;
+            saveBtn.innerHTML = count === 0 
+                ? `<i class="ph ph-download-simple"></i> 結合して保存` 
+                : `<i class="ph ph-download-simple"></i> ${count}ページを保存`;
+            
+            if (count === 0) {
+                // Return to drop zone if empty
+                dropZone.classList.remove('hidden');
+                pageGrid.classList.add('hidden');
+                fabAdd.classList.add('hidden');
+            }
+        }
+
+        function showLoading(show, text = '処理中...') {
+            loadingText.textContent = text;
+            if (show) {
+                loadingOverlay.classList.remove('hidden');
+            } else {
+                loadingOverlay.classList.add('hidden');
+            }
+        }
+
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.style.opacity = '1';
+            setTimeout(() => {
+                toast.style.opacity = '0';
+            }, 3000);
+        }
+
+    </script>
+</body>
+</html>
